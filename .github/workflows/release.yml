@@ -1,0 +1,41 @@
+name: Test and release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install python-docx pymupdf pillow pypdf pytest
+      - run: pytest tests -q
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the skill zip
+        run: zip -r auto-mechanic-assignments.zip auto-mechanic-assignments -x "auto-mechanic-assignments/evals/*" "*/__pycache__/*" "*.DS_Store"
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" auto-mechanic-assignments.zip --clobber
+          else
+            gh release create "$TAG" auto-mechanic-assignments.zip --title "$TAG" \
+              --notes "Download auto-mechanic-assignments.zip below and upload it in Claude: Settings > Capabilities > Skills > Upload skill."
+          fi

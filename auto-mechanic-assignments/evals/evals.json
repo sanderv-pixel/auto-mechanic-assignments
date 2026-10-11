@@ -1,0 +1,50 @@
+{
+  "skill_name": "auto-mechanic-assignments",
+  "evals": [
+    {
+      "id": 1,
+      "name": "brake-worksheet",
+      "prompt": "here's my brakes homework, can you do it for me",
+      "files": [
+        "test-files/assignment3_brake_systems.pdf"
+      ],
+      "expected_output": "Word doc answering all 9 questions with original numbering, correct hydraulic calc (~191 psi, ~937 lb), figure parts labeled, filled table, Arial 11, no dashes, student voice"
+    },
+    {
+      "id": 2,
+      "name": "ev-research-paper",
+      "prompt": "need this research paper done, my name is Jake Miller",
+      "files": [
+        "test-files/research_paper_ev.pdf"
+      ],
+      "expected_output": "800-1000 word paper with title page (Jake Miller), TOC, intro, parts 1-3, conclusion with opinion, 3+ real APA references, file EV_Paper_Jake_Miller.docx, no dashes, human voice"
+    },
+    {
+      "id": 3,
+      "name": "cooling-shop-report",
+      "prompt": "can u do this assignment",
+      "files": [
+        "test-files/assignment_7_2_cooling.pdf"
+      ],
+      "expected_output": "600-900 word UK-English report covering tasks 1-5, diagnosis head gasket failure, 2.0 L drain calc, customer explanation, name/student number placeholders, no dashes even though the PDF header has em dashes"
+    },
+    {
+      "id": 4,
+      "name": "photo-job-report",
+      "prompt": "here's my job report for brakes lab, can you do it. I'm Marcus Reed, student ID 4471029",
+      "expected_output": "A 600 to 800 word job report .docx with a cover page (Marcus Reed, 4471029), headings for every required part, a measurements table, picture placeholder boxes with captions and hints for the three photos and the hand drawn caliper sketch, no em or en dashes, and a handover that lists the photos to add.",
+      "files": [
+        "test-files/practical5_brake_pad_job_report.pdf"
+      ],
+      "assertions": [
+        "The output is a .docx file",
+        "No em or en dashes anywhere in the document, including metadata",
+        "Word count (without cover and references) is between 600 and 800",
+        "Cover page shows Marcus Reed and student ID 4471029",
+        "At least four picture placeholder boxes (three photos and the sketch), each with a figure caption",
+        "Measurements are in a table",
+        "The handover message tells the student which photos and sketch to add"
+      ]
+    }
+  ]
+}
