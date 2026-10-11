@@ -155,6 +155,48 @@ def scan_docx_parts(path: Path, result: Result) -> None:
                 result.failures.append(f"dash hidden in {name}: {snippet(searchable, match.start(), match.end(), 30)}")
 
 
+TEMPLATE_IDS = ("00B47730", "EF278816-EC6F-A645-907D-7F25AECB1D4A")  # same in every python-docx file
+FIXED_DOC_ID = '<w14:docId w14:val="24062061"/>'  # python-docx template's document id
+GENERATORS = re.compile(r"\b(?:python-docx|libreoffice|openoffice|claude|anthropic|openai|chatgpt|gpt-\d)\b",
+                        re.IGNORECASE)
+AUTHOR_FIELDS = re.compile(r"<(dc:creator|cp:lastModifiedBy)>.*?</\1>", re.DOTALL)  # the student's own name
+
+
+def scan_file_traces(path: Path, result: Result) -> None:
+    """Things that show the file was made by a script rather than saved by Word."""
+    problems: list[str] = []
+    with zipfile.ZipFile(path) as archive:
+        names = archive.namelist()
+        parts = {name: archive.read(name).decode("utf-8", errors="ignore") for name in names
+                 if name.endswith((".xml", ".rels"))}
+    joined = "".join(parts.values())
+    if any(marker in joined for marker in TEMPLATE_IDS):  # Word writes rsids too, but never these ones
+        problems.append("template edit ids (rsids) or bibliography id from python-docx")
+    if any(name.startswith("docProps/thumbnail") or "stylesWithEffects" in name for name in names):
+        problems.append("leftover template parts (thumbnail or stylesWithEffects)")
+    if FIXED_DOC_ID in parts.get("word/settings.xml", ""):
+        problems.append("the template's fixed document id in the settings")
+    if 'w:styleId="LightShading' in parts.get("word/styles.xml", ""):
+        problems.append("unused template styles (the 100 table styles python-docx ships)")
+    if any(re.search(r">\s*\n\s*<", re.sub(r"^<\?xml[^>]*\?>\s*", "", text)) for text in parts.values()):
+        problems.append("indented XML (Word writes every part on one line)")
+    if any(text.startswith("<?xml version='1.0'") for text in parts.values()):
+        problems.append("XML written by a script (single-quoted declaration)")
+    app = parts.get("docProps/app.xml", "")
+    has_text = re.search(r"<w:t(?: [^>]*)?>[^<]*\w", parts.get("word/document.xml", ""))
+    if "<Application>Microsoft Office Word</Application>" not in app or (has_text and "<Words>0</Words>" in app):
+        problems.append("file properties do not match a Word document (application or word count)")
+    metadata = " ".join(AUTHOR_FIELDS.sub("", text) for name, text in parts.items() if name.startswith("docProps/"))
+    metadata += " ".join(re.findall(r'(?:descr|title|name)="([^"]*)"', parts.get("word/document.xml", "")))
+    generator = GENERATORS.search(metadata)
+    if generator:
+        problems.append(f"generator name in the properties or image details: {generator.group(0)!r}")
+    if re.search(r'<pic:cNvPr [^>]*name="[^"]+\.(?:png|jpe?g|gif|bmp|tiff?)"', parts.get("word/document.xml", "")):
+        problems.append("image file names in the picture properties")
+    for problem in problems:
+        result.failures.append(f"file traces: {problem}. Rebuild with build_docx.py.")
+
+
 def load_docx(path: Path, result: Result) -> list[Block]:
     try:
         from docx import Document
@@ -168,6 +210,7 @@ def load_docx(path: Path, result: Result) -> list[Block]:
     if "python-docx" in author.lower():
         result.failures.append("Metadata author is 'python-docx'. Rebuild with build_docx.py or clear the author.")
     scan_docx_parts(path, result)
+    scan_file_traces(path, result)
 
     in_cover = any(p.style is not None and p.style.name == "Title" for p in doc.paragraphs)
     sections = Sections()

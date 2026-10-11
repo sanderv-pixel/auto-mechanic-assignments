@@ -128,13 +128,21 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().lower()
 
 
-def heading_pages(docx: Path, headings: list[str]) -> dict[int, int] | None:
-    """Page number of every heading (by position in the list), or None if LibreOffice is not available."""
+def page_count(docx: Path) -> int | None:
+    """Pages as LibreOffice lays the file out, or None without LibreOffice."""
+    with tempfile.TemporaryDirectory() as temp:
+        pdf = to_pdf(docx, Path(temp))
+        return None if pdf is None else pdf_page_count(pdf)
+
+
+def heading_pages(docx: Path, headings: list[str]) -> tuple[dict[int, int], int] | None:
+    """(page number of every heading by position in the list, total pages), or None without LibreOffice."""
     with tempfile.TemporaryDirectory() as temp:
         pdf = to_pdf(docx, Path(temp))
         if pdf is None:
             return None
         outline = [(normalize(title), page) for _, title, page in pdf_outline(pdf)]
+        total_pages = pdf_page_count(pdf)
     pages: dict[int, int] = {}
     cursor = 0
     for index, heading in enumerate(headings):
@@ -144,7 +152,7 @@ def heading_pages(docx: Path, headings: list[str]) -> dict[int, int] | None:
                 pages[index] = outline[position][1]
                 cursor = position + 1
                 break
-    return pages or None
+    return (pages, total_pages) if pages else None
 
 
 def page_images(pdf: Path, out_dir: Path, dpi: int = 70) -> list[Path]:

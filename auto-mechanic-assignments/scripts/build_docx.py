@@ -33,7 +33,9 @@ Lines under a "References" / "Works Cited" / "Bibliography" heading get an APA-s
 indent. URLs and fill-in blanks (___) are never treated as formatting.
 
 Safety nets: every em dash and en dash is removed (body, cover, header, metadata, image names)
-and reported, and the file metadata is set to the student instead of "python-docx".
+and reported, and the finished file carries no traces of the script that made it: template ids,
+preview thumbnail and leftover parts are removed, the file properties name the student and give
+real counts, and the package is written the way Word writes it (see docx_finalize.py).
 
 Usage:
   python3 build_docx.py answers.md -o Assignment.docx [--theme navy] [--font Arial] [--size 11]
@@ -43,7 +45,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import math
 import re
 import shutil
@@ -56,11 +57,14 @@ try:
     from docx import Document
     from docx.document import Document as WordDocument
     from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
+    from docx.oxml.ns import qn
     from docx.shared import Cm, Pt
+    from lxml import etree
 except ImportError:
     sys.exit("python-docx is missing. Install it with: pip install python-docx")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import docx_finalize  # noqa: E402
 import docx_style as ds  # noqa: E402
 import office_render  # noqa: E402
 
@@ -86,7 +90,7 @@ WORD_IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff"}
 NBSP = chr(0xA0)
 CONTROL_CHARS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")  # not allowed in Word XML
 PAGEBREAKS = {"\\pagebreak", "<!-- pagebreak -->", "[pagebreak]"}
-METADATA_MAX = 255  # Word's limit for title, subject and author
+METADATA_MAX = 255  # Word's limit for the author field
 
 
 @dataclass(frozen=True)
@@ -275,20 +279,6 @@ def detail_value(details: list[tuple[str, str]], keys: set[str]) -> str:
 
 
 # ------------------------------------------------------------ document parts
-
-def set_metadata(doc, settings: Settings, details: list[tuple[str, str]]) -> None:
-    author = plain_text(detail_value(details, NAME_KEYS))[:METADATA_MAX]
-    now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None, microsecond=0)  # Word stores UTC
-    props = doc.core_properties
-    props.author = author
-    props.last_modified_by = author
-    props.title = plain_text(settings.title)[:METADATA_MAX]
-    props.subject = plain_text(settings.subtitle)[:METADATA_MAX]
-    props.comments = props.keywords = props.category = ""
-    props.created = props.modified = now
-    props.revision = 1
-    props.language = settings.lang
-
 
 def page_break(doc) -> None:
     """A 1 pt paragraph holding the break, so nothing visible lands at the top of the next page."""
@@ -667,7 +657,6 @@ def compose(settings: Settings, details: list[tuple[str, str]], body: list[str],
     doc = Document()
     ds.modern_layout(doc)
     ds.setup_styles(doc, theme, settings.font, settings.size, settings.spacing, settings.lang)
-    set_metadata(doc, settings, details)
     if use_cover:
         add_cover(doc, settings, details, theme, report)
     else:
@@ -680,20 +669,44 @@ def compose(settings: Settings, details: list[tuple[str, str]], body: list[str],
     return doc, report
 
 
-def toc_page_numbers(output: Path, body: list[str]) -> dict[int, int] | None:
-    """Page of each contents entry. Every heading level is matched in order, so a ### heading with
-    the same text as a later ## heading can't steal its page number."""
+def toc_page_numbers(output: Path, body: list[str]) -> tuple[dict[int, int], int] | None:
+    """(page of each contents entry, total pages). Every heading level is matched in order, so a ###
+    heading with the same text as a later ## heading can't steal its page number."""
     every = collect_headings(body, max_level=6)
-    found = office_render.heading_pages(output.resolve(), [text for _, text in every])
-    if not found:
+    rendered = office_render.heading_pages(output.resolve(), [text for _, text in every])
+    if not rendered:
         return None
+    found, total_pages = rendered
     pages, entry = {}, 0
     for index, (level, _) in enumerate(every):
         if level <= 2:
             if index in found:
                 pages[entry] = found[index]
             entry += 1
-    return pages or None
+    return (pages, total_pages) if pages else None
+
+
+def body_texts(doc: WordDocument) -> list[str]:
+    """Text of every paragraph in the main body, tables included (what Word counts in File > Info)."""
+    return ["".join(node.text or "" for node in p.iter(qn("w:t"))) for p in doc.element.body.iter(qn("w:p"))]
+
+
+def customized_styles(doc: WordDocument) -> frozenset[str]:
+    """Styles this build added or changed. Word keeps those even before anything uses them."""
+    def snapshot(document: WordDocument) -> dict[str, bytes]:
+        return {style.get(qn("w:styleId")): etree.tostring(style)
+                for style in document.styles.element.iter(qn("w:style"))}
+    template = snapshot(Document())
+    return frozenset(sid for sid, xml in snapshot(doc).items() if template.get(sid) != xml)
+
+
+def finish(doc: WordDocument, output: Path, settings: Settings, details: list[tuple[str, str]],
+           use_cover: bool, pages: int | None) -> None:
+    doc.save(str(output))
+    extra_pages = int(use_cover) + int(settings.toc)
+    stats = docx_finalize.document_stats(body_texts(doc), pages, extra_pages)
+    author = plain_text(detail_value(details, NAME_KEYS))[:METADATA_MAX]
+    docx_finalize.finalize(output, author, stats, keep_styles=customized_styles(doc))
 
 
 def build(source: Path, output: Path, args: argparse.Namespace) -> Report:
@@ -702,17 +715,23 @@ def build(source: Path, output: Path, args: argparse.Namespace) -> Report:
     settings = build_settings(raw_settings, args)
     output.parent.mkdir(parents=True, exist_ok=True)
 
+    use_cover = bool(settings.title) and (settings.cover if settings.cover is not None else True)
     doc, report = compose(settings, details, body, source.parent, None)
-    doc.save(str(output))
+    finish(doc, output, settings, details, use_cover, None)
     if settings.toc:
-        pages = None if args.no_render else toc_page_numbers(output, body)
-        if pages:
+        rendered = None if args.no_render else toc_page_numbers(output, body)
+        if rendered:
+            pages, total_pages = rendered
             doc, report = compose(settings, details, body, source.parent, pages)
-            doc.save(str(output))
+            finish(doc, output, settings, details, use_cover, total_pages)
             report.notes.append(f"contents page numbers filled in from a LibreOffice render ({len(pages)} headings)")
         else:
             report.notes.append("contents page has no page numbers yet: tell the student to right-click it in "
                                 "Word and pick Update Field")
+    elif not args.no_render:
+        rendered_pages = office_render.page_count(output.resolve())  # for the count in the file properties
+        if rendered_pages:
+            finish(doc, output, settings, details, use_cover, rendered_pages)
     if raw_settings.get("lang") and lang_code(raw_settings) is None:
         report.notes.append(f"lang {raw_settings['lang']!r} not recognised, used en-US (Letter); use en-US or en-GB")
     return report
@@ -726,7 +745,7 @@ def main() -> None:
     parser.add_argument("--font", help="font name, e.g. Arial (overrides front matter)")
     parser.add_argument("--size", help="font size, e.g. 12 or 12pt")
     parser.add_argument("--spacing", help="line spacing, e.g. 1.5 or 2")
-    parser.add_argument("--no-render", action="store_true", help="skip the LibreOffice pass for contents page numbers")
+    parser.add_argument("--no-render", action="store_true", help="skip the LibreOffice pass for page numbers")
     args = parser.parse_args()
 
     if not args.source.is_file():

@@ -116,14 +116,21 @@ When the task sets layout rules, put them in the front matter (`font: Arial`, `s
 Otherwise the defaults (Calibri 11, spacing 1.15) are fine. The default color theme is `navy`; use
 `theme: plain` (black and white, no colored boxes) when the task prescribes a strict format such as an
 APA or MLA title page, or says no colors; `graphite` is a dark gray and red alternative. The builder
-also sets the page size and spell-check language, puts the student's name in the file properties
-instead of "python-docx", and strips any dash that slipped through. If it reports removed dashes, go
-back and rewrite those sentences properly in `answers.md`, because an automatic comma rarely reads
-well.
+also sets the page size and spell-check language and strips any dash that slipped through. If it
+reports removed dashes, go back and rewrite those sentences properly in `answers.md`, because an
+automatic comma rarely reads well.
 
-Always deliver a `.docx` file. Only if the task explicitly demands another format (old `.doc`, PDF),
-also convert a copy with LibreOffice when it is available
-(`soffice --headless --convert-to doc --outdir <folder> <file>.docx`) and say so in the handover.
+The builder also cleans the file itself, so nothing in it points to a script: the python-docx template's
+edit ids, document id, unused styles and preview picture are removed, the properties carry the
+student's name, the real word count and the page count (from a render when LibreOffice is there,
+otherwise an estimate), and the package is written the way Word writes it. Editing time starts at zero
+and the revision number at 1, like any new file; Word updates them when the student works on it. So the `.docx` that `build_docx.py` saves is the final file: don't open it with python-docx,
+LibreOffice or an unzip/zip step afterwards, because each of those leaves its own traces. To change
+something, change `answers.md` and rebuild.
+
+Always deliver a `.docx` file, even when the task asks for an old `.doc` or a PDF. Don't convert it
+here (LibreOffice writes its own name into the files it makes); tell the student to use File > Save As
+in Word instead.
 
 Output folder: in Claude.ai use `/mnt/user-data/outputs/`; otherwise put it next to the task PDF or
 in the current folder. File name: the one the task asks for, otherwise the assignment name with
@@ -136,8 +143,10 @@ underscores, plus the student's name only when you know it: `Assignment_3_Brake_
 python3 <skill-dir>/scripts/check_text.py "<output-folder>/<file name>.docx" [--min-words N --max-words M]
 ```
 
-It fails on any dash, on leftover "python-docx" metadata and on a word count outside the range you
-pass. The word count leaves out the cover page, the name/class lines, the table of contents, the text
+It fails on any dash, on file traces that show the document came from a script (template ids, leftover
+template parts, unused template styles, indented XML, properties that don't match the document) and on
+a word count outside the range you pass. A file traces failure means the file was made or touched by
+something other than `build_docx.py`; rebuild it. The word count leaves out the cover page, the name/class lines, the table of contents, the text
 inside picture placeholder boxes and the references section, which is how teachers count, so pass the
 task's own limits. Headings, figure captions and table text do count, so a report with many photos and
 tables needs a tighter word budget for the prose. It warns about
@@ -172,7 +181,9 @@ student needs to know:
 - values you had to assume that they should replace with their own measurements or observations,
 - the picture placeholders: which photo or drawing goes in which box (the builder prints the list),
   and that they click in the box, delete the text and use Insert > Pictures,
-- anything else the task wants that a document can't contain (a signature, a physical part).
+- anything else the task wants that a document can't contain (a signature, a physical part),
+- to open the file in Word, make those changes, read it through and save it from Word before handing
+  it in. If the task wants a `.doc` or PDF, File > Save As in Word does that.
 
 Don't paste the whole document into the chat.
 

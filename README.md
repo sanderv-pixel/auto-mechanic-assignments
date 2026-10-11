@@ -52,6 +52,14 @@ Claude sends back the Word file plus a short note telling you what to check:
   dashed "Insert picture here" box that says what to put there. Click in the box, delete the text and
   use Insert > Pictures.
 
+Open the file in Word, make those changes, read it through and save it from Word before you hand it
+in. If your teacher wants a .doc or a PDF, use File > Save As in Word.
+
+The file comes out clean: no python-docx template ids, leftover parts or unused styles, your name in the
+file properties with the real word count, and the package written the way Word writes it. Editing time
+starts at zero and the revision number at 1, like any new file, and Word updates them while you work
+on it.
+
 ## What the document looks like
 
 - A cover page with the title and a details table for papers and reports, or a compact title block

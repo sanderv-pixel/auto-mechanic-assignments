@@ -5,6 +5,7 @@ Run: python -m pytest tests/ -q   (needs python-docx, pymupdf, pillow, pytest)
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import zipfile
@@ -24,7 +25,10 @@ EM, EN = chr(0x2014), chr(0x2013)
 DASH_CHARS = (EM, EN, chr(0x2015), chr(0x2012))
 
 
-def build(tmp_path: Path, markdown: str, *flags: str) -> tuple[Path, str]:
+def build(tmp_path: Path, markdown: str, *flags: str, render: bool | None = None) -> tuple[Path, str]:
+    """Builds render with LibreOffice only for a contents page unless asked, to keep the suite fast."""
+    if not (render if render is not None else "toc: true" in markdown) and "--no-render" not in flags:
+        flags = (*flags, "--no-render")
     source = tmp_path / "answers.md"
     source.write_text(markdown, encoding="utf-8")
     output = tmp_path / "out.docx"
@@ -468,3 +472,138 @@ def test_failed_conversion_never_returns_a_stale_pdf(tmp_path, monkeypatch):
     stale.parent.mkdir()
     stale.write_bytes(b"%PDF-1.4 old render")
     assert office_render.to_pdf(tmp_path / "doc.docx", tmp_path / "out") is None and not stale.exists()
+
+
+# ------------------------------------------------------------- file traces
+
+TEMPLATE_IDS = ("00B47730", "EF278816-EC6F-A645-907D-7F25AECB1D4A", "24062061")
+STYLE_REFERENCE = re.compile(rb'<w:(?:pStyle|rStyle|tblStyle|numStyle|basedOn|link|next) w:val="([^"]+)"')
+
+
+def parts_of(path: Path) -> dict[str, bytes]:
+    with zipfile.ZipFile(path) as archive:
+        return {name: archive.read(name) for name in archive.namelist()}
+
+
+def test_no_template_fingerprints_or_leftover_parts(tmp_path):
+    from PIL import Image
+    Image.new("RGB", (40, 20), "white").save(tmp_path / "fig.png")
+    md = "---\ntitle: Brakes\nName: Jake Miller\n---\n# Intro\nThe pads were worn.\n![Figure 1: Pads](fig.png)\n"
+    output, _ = build(tmp_path, md)
+    parts = parts_of(output)
+    joined = b"".join(parts.values())
+    assert not any(marker.encode() in joined for marker in TEMPLATE_IDS)
+    assert b"w:rsid" not in joined
+    assert not any(name.startswith(("customXml/", "docProps/thumbnail")) or "stylesWithEffects" in name
+                   for name in parts)
+    assert b"savePreviewPicture" not in parts["word/settings.xml"]
+    assert b'name="figure' not in parts["word/document.xml"]
+
+
+def test_settings_and_styles_are_trimmed_like_word(tmp_path):
+    md = ("---\ntitle: Brakes\nName: Jake Miller\n---\n# Intro\nThe pads were worn.\n\n"
+          "| Part | Reading |\n|---|---|\n| Pad | 3 mm |\n")
+    output, _ = build(tmp_path, md, "--no-render")
+    parts = parts_of(output)
+    settings = parts["word/settings.xml"]
+    assert b"ja-JP" not in settings and b"doNotAutoCompressPictures" not in settings
+    assert re.search(rb'<w:zoom w:percent="\d+"/>', settings)
+    styles = parts["word/styles.xml"]
+    assert b'w:styleId="LightShading' not in styles and len(styles) < 80_000  # the template's unused table styles
+    assert b'w:styleId="Heading2"' in styles  # themed styles stay for headings the student adds in Word
+    defined = set(re.findall(rb'<w:style [^>]*w:styleId="([^"]+)"', styles))
+    referenced = {ref for data in parts.values() for ref in STYLE_REFERENCE.findall(data)}
+    assert referenced <= defined  # nothing in use was pruned
+    for name, data in parts.items():
+        if name.endswith((".xml", ".rels")):
+            assert not re.search(rb">\s*\n\s*<", data.split(b"\r\n", 1)[1]), name  # Word does not indent XML
+    assert check(output).returncode == 0
+
+
+def test_package_is_written_like_word(tmp_path):
+    output, _ = build(tmp_path, "---\ntitle: Brakes\nName: Jake Miller\n---\n# Intro\nThe pads were worn out.\n")
+    with zipfile.ZipFile(output) as archive:
+        infos = archive.infolist()
+        assert infos[0].filename == "[Content_Types].xml"
+        assert all(info.date_time == (1980, 1, 1, 0, 0, 0) and info.create_system == 0 for info in infos)
+        for info in infos:
+            if info.filename.endswith((".xml", ".rels")):
+                assert archive.read(info).startswith(b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n')
+
+
+def test_properties_match_the_document(tmp_path):
+    output, _ = build(tmp_path, "---\ntitle: Brakes\nName: Jake Miller\n---\n# Intro\nThe pads were worn out.\n",
+                      "--no-render")
+    app = parts_of(output)["docProps/app.xml"].decode()
+    core = parts_of(output)["docProps/core.xml"].decode()
+    assert "<Application>Microsoft Office Word</Application>" in app and "<AppVersion>16.0000</AppVersion>" in app
+    words = int(re.search(r"<Words>(\d+)</Words>", app).group(1))
+    assert words >= 6 and int(re.search(r"<Pages>(\d+)</Pages>", app).group(1)) >= 2  # cover + body
+    assert "<dc:creator>Jake Miller</dc:creator>" in core and "<cp:revision>1</cp:revision>" in core
+    assert re.search(r"<dcterms:created [^>]*>\d{4}-\d\d-\d\dT\d\d:\d\d:00Z<", core)  # Word stores whole minutes
+    assert "dc:language" not in core and "<cp:keywords" not in core and "python-docx" not in app + core
+    assert check(output).returncode == 0
+
+
+def test_checker_accepts_a_student_named_claude(tmp_path):
+    output, _ = build(tmp_path, "---\ntitle: Brakes\nName: Claude O'Brien & Sons\n---\n# Intro\nThe pads were worn.\n")
+    result = check(output)
+    assert result.returncode == 0, result.stdout
+
+
+def test_checker_leaves_word_saved_files_alone(tmp_path):
+    output, _ = build(tmp_path, "---\ntitle: Brakes\nName: Jake Miller\n---\n# Intro\nThe pads were worn out.\n")
+    parts = parts_of(output)
+    document = parts["word/document.xml"]
+    parts["word/document.xml"] = re.sub(rb"<w:p([ >])", rb'<w:p w:rsidR="00D41C2A"\1', document, count=1)
+    parts["customXml/item1.xml"] = b'<b:Sources xmlns:b="http://schemas.openxmlformats.org/officeDocument/2006/bibliography"/>'
+    saved = tmp_path / "saved.docx"
+    with zipfile.ZipFile(saved, "w") as archive:
+        for name, data in parts.items():
+            archive.writestr(name, data)
+    assert "file traces" not in check(saved).stdout
+
+
+def test_checker_accepts_a_document_without_text(tmp_path):
+    from PIL import Image
+    Image.new("RGB", (40, 20), "white").save(tmp_path / "fig.png")
+    output, _ = build(tmp_path, "---\ncover: false\n---\n![](fig.png)\n")
+    assert "file traces" not in check(output).stdout
+
+
+def test_build_leaves_neighbouring_files_alone(tmp_path):
+    notes = tmp_path / "out.tmp"
+    notes.write_text("student notes")
+    output, _ = build(tmp_path, "---\ntitle: Brakes\n---\n# Intro\nThe pads were worn out.\n")
+    assert notes.read_text() == "student notes"
+    assert output.stat().st_mode & 0o777 == notes.stat().st_mode & 0o777  # readable like any other file
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["answers.md", "out.docx", "out.tmp"]
+
+
+def test_external_links_survive_the_cleanup():
+    import docx_finalize
+    rels = (b'<Relationships><Relationship Id="rId9" Type="http://x/hyperlink" '
+            b'Target="https://example.com/customXml/guide" TargetMode="External"/>'
+            b'<Relationship Id="rId3" Type="http://x/customXml" Target="../customXml/item1.xml"/></Relationships>')
+    cleaned = docx_finalize.strip_template_traces("word/_rels/document.xml.rels", rels, set())
+    assert b'Id="rId9"' in cleaned and b'Id="rId3"' not in cleaned
+
+
+@needs_libreoffice
+def test_page_count_comes_from_the_render(tmp_path):
+    md = "---\ntitle: Brakes\nName: Jake Miller\n---\n# Intro\n" + "The pads were worn and the rotor was scored. " * 400
+    output, _ = build(tmp_path, md + "\n", render=True)
+    pages = int(re.search(r"<Pages>(\d+)</Pages>", parts_of(output)["docProps/app.xml"].decode()).group(1))
+    assert pages == office_render.page_count(output)
+
+
+def test_checker_flags_script_made_files(tmp_path):
+    doc = Document()
+    doc.add_paragraph("Plain text written by a script.")
+    doc.core_properties.author = "Jake"
+    path = tmp_path / "raw.docx"
+    doc.save(str(path))
+    result = check(path)
+    assert result.returncode == 1 and "file traces" in result.stdout
+    assert "unused template styles" in result.stdout and "indented XML" in result.stdout
+    assert "fixed document id" in result.stdout
